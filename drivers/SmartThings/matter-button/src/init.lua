@@ -3,142 +3,189 @@ local log = require "log"
 local clusters = require "st.matter.generated.zap_clusters"
 local MatterDriver = require "st.matter.driver"
 local lua_socket = require "socket"
+local device_lib = require "st.device"
+local utils = require "st.utils"
 
---button state machine states
-local BUTTON_STATE_MAP = {
-  WAIT = 1,
-  PRESSED = 2,
-  HELD_COMPLETE = 3,
-}
-local STATE = "state"
--- singlepress, multipress, latching switch
-local BUTTON_TYPE = "__button_type" --should get set when device is added
-local BUTTON_TYPE_MAP = {
-  SINGLE_PRESS = 1,
-  MULTI_PRESS = 2,
-  LATCH_SWITCH = 3
-}
-local MAX_PRESS = "__max_press"
-local BUTTON_X_PRESS_TIME = "button_%d_pressed_time"
-local TIMEOUT_THRESHOLD = 50 --arbitrary timeout
+local START_BUTTON_PRESS = "__start_button_press"
+local TIMEOUT_THRESHOLD = 10 --arbitrary timeout
+local HELD_THRESHOLD = 1
+-- this is the number of buttons for which we have a static profile already made
+local STATIC_PROFILE_SUPPORTED = {2, 4, 8}
 
+local ENDPOINT_TO_COMPONENT_MAP = "__endpoint_to_component_map"
+
+-- These are essentially storing the supported features of a given endpoint
+-- TODO: add an is_feature_supported_for_endpoint function to matter.device that takes an endpoint
+local EMULATE_HELD = "__emulate_held" -- for MSR devices we can emulate this on the software side
+local MULTI_BUTTON = "__multi_button" -- for multi-press devices, only trigger an event on a multi-button complete
+local INITIAL_PRESS_ONLY = "__initial_press_only" -- for devices that support MS, but not MSR
 
 --helper function to create liste of multi press values
 local function create_multi_list(size)
-  local list = {"pushed", "held", "double"}
-  if size > 2 then
-    for i=3, size do
-      table.insert(list, string.format("pushed_%dx", i))
-    end
+  local list = {"pushed", "double"}
+  for i=3, size do
+    table.insert(list, string.format("pushed_%dx", i))
   end
   return list
 end
 
+local function contains(array, value)
+  for _, element in ipairs(array) do
+    if element == value then
+      return true
+    end
+  end
+  return false
+end
+
+local function get_field_for_endpoint(device, field, endpoint)
+  return device:get_field(string.format("%s_%d", field, endpoint))
+end
+
+local function set_field_for_endpoint(device, field, endpoint, value, persist)
+  device:set_field(string.format("%s_%d", field, endpoint), value, {persist = persist})
+end
+
 --helper functions for button timing
 --button_number is which button was pressed?
-local function init_press(device, button_number)
-  device:set_field(string.format(BUTTON_X_PRESS_TIME, button_number or 0), lua_socket.gettime())
+local function init_press(device, endpoint)
+  set_field_for_endpoint(device, START_BUTTON_PRESS, endpoint, lua_socket.gettime(), false)
 end
 
---helper function for pseudo state machine
-local function next_button_state(device, next_state, button_number)
-  local press_time = device:get_field(string.format(BUTTON_X_PRESS_TIME, button_number or 0))
-  local time_diff = lua_socket.gettime() - press_time
-  local state = device:get_field(STATE)
-  if state == nil then
-    state = BUTTON_STATE_MAP.WAIT
-  end
-
-  local set_state
-  if time_diff < TIMEOUT_THRESHOLD then
-    if next_state == BUTTON_STATE_MAP.PRESSED and state == BUTTON_STATE_MAP.WAIT then
-      set_state = BUTTON_STATE_MAP.PRESSED
-    elseif next_state == BUTTON_STATE_MAP.HELD_COMPLETE and state == BUTTON_STATE_MAP.PRESSED then
-      set_state = BUTTON_STATE_MAP.HELD_COMPLETE
+local function emulate_held_event(device, ep)
+  local now = lua_socket.gettime()
+  local press_init = get_field_for_endpoint(device, START_BUTTON_PRESS, ep) or now -- if we don't have an init time, assume instant release
+  if (now - press_init) < TIMEOUT_THRESHOLD then
+    if (now - press_init) > HELD_THRESHOLD then
+      device:emit_event_for_endpoint(ep, capabilities.button.button.held({state_change = true}))
     else
-      set_state = BUTTON_STATE_MAP.WAIT
-    end
-  else
-    set_state = BUTTON_STATE_MAP.WAIT
-  end
-  device:set_field(STATE, set_state)
-end
-
---emit the proper events
-local function button_event(device, ib,  multi_press)
-  local state = device:get_field(STATE)
-  local button_type = device:get_field(BUTTON_TYPE)
-  if button_type == nil then
-    if multi_press > 0 then
-      button_type = BUTTON_TYPE_MAP.MULTI_PRESS
-    else
-      button_type = BUTTON_TYPE_MAP.SINGLE_PRESS
+      device:emit_event_for_endpoint(ep, capabilities.button.button.pushed({state_change = true}))
     end
   end
-
-  if button_type ~= BUTTON_TYPE_MAP.LATCH_SWITCH then
-    local event
-    if button_type == BUTTON_TYPE_MAP.SINGLE_PRESS then
-      if state == BUTTON_STATE_MAP.HELD_COMPLETE then
-        event = capabilities.button.button.held({state_change = true})
-      elseif state == BUTTON_STATE_MAP.PRESSED then
-        event = capabilities.button.button.pushed({state_change = true})
-      end
-    elseif button_type == BUTTON_TYPE_MAP.MULTI_PRESS then
-      if state == BUTTON_STATE_MAP.HELD_COMPLETE then
-        if multi_press == 2 then
-          event = capabilities.button.button.double({state_change = true})
-        else
-          event = capabilities.button.button(string.format("pushed_%dx", multi_press))
-        end
-      end
-    end
-    if event ~= nil then
-      device:emit_event_for_endpoint(ib.endpoint_id, event)
-    end
-  end
+  set_field_for_endpoint(device, START_BUTTON_PRESS, ep, nil, false)
 end
 
 --end of helper functions
 --------------------------------------------------------------------------
+
+local function endpoint_to_component(device, ep)
+  local map = device:get_field(ENDPOINT_TO_COMPONENT_MAP) or {}
+  if map[ep] and device.profile.components[map[ep]] then
+    return map[ep]
+  end
+  return "main"
+end
+
+local function component_to_endpoint(device, component_name)
+  local map = device:get_field(ENDPOINT_TO_COMPONENT_MAP) or {}
+  for ep, component in pairs(map) do
+    if component == component_name then return ep end
+  end
+end
+
+local function find_child(parent, ep_id)
+  return parent:get_child_by_parent_assigned_key(string.format("%02X", ep_id))
+end
+
 local function device_init(driver, device)
-  device:subscribe()
+  if device.network_type == device_lib.NETWORK_TYPE_MATTER then
+    device:subscribe()
+    device:set_find_child(find_child)
+    device:set_endpoint_to_component_fn(endpoint_to_component)
+    device:set_component_to_endpoint_fn(component_to_endpoint)
+  end
 end
 
 local function device_added(driver, device)
-  local MS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH})
-  local MSR = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_RELEASE})
-  local MSL = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_LONG_PRESS})
-  local MSM = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_MULTI_PRESS})
+  if device.network_type ~= device_lib.NETWORK_TYPE_CHILD then
+    local MS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH})
+    local LS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.LATCHING_SWITCH})
 
-  if #MS > 0 then
-    if #MSL < 1 and #MSM < 1 then
-      device:set_field(BUTTON_TYPE, BUTTON_TYPE_MAP.SINGLE_PRESS) --singlepress
-      device:emit_event(capabilities.button.supportedButtonValues({"pushed"}, {visibility = {displayed = false}})) --supported values
+    -- find the default/main endpoint, the device with the lowest EP that supports MS
+    table.sort(MS)
+    local main_endpoint = MS[1] -- the endpoint matching to the non-child device
+    if MS[1] == 0 then main_endpoint = MS[2] end -- we shouldn't hit this, but just in case
 
-    elseif #MSR > 0 and #MSL > 0 and #MSM < 1 then
-      device:set_field(BUTTON_TYPE, BUTTON_TYPE_MAP.SINGLE_PRESS) --singlepress
-      device:emit_event(capabilities.button.supportedButtonValues({"pushed", "held"},{visibility = {displayed = false}})) --supported values
+    local MSR = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_RELEASE})
+    local MSL = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_LONG_PRESS})
+    local MSM = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_MULTI_PRESS})
 
-    elseif #MSM > 0 then
-      device:set_field(BUTTON_TYPE, BUTTON_TYPE_MAP.MULTI_PRESS) -- multipress
-
-      --send read MultiPressMax attribute request
-      local req = clusters.Switch.attributes.MultiPressMax:read(device)
-      device:send(req)
-
+    -- We have a static profile that will work for this number of buttons
+    if contains(STATIC_PROFILE_SUPPORTED, #MS) then
+      device:try_update_metadata({profile = string.format("%d-button", #MS)})
     end
-    device:emit_event(capabilities.button.button.pushed({state_change = false})) --button is not pressed yet
 
-  else
-    --it is a latching switch
-    device:set_field(BUTTON_TYPE, BUTTON_TYPE_MAP.LATCH_SWITCH) -- latching switch
-    device:emit_event(capabilities.button.supportedButtonValues({"up","down"}, {visibility = {displayed = false}}))
+    -- At the moment, we're taking it for granted that all momentary switches only have 2 positions
+    -- TODO: flesh this out for NumberOfPositions > 2
+    local current_component_number = 2
+    for _, ep in ipairs(MS) do -- for each momentary switch endpoint (including main)
+      -- build the mapping of endpoints to components if we have a static profile (multi-component)
+      if contains(STATIC_PROFILE_SUPPORTED, #MS) then
+        local map = device:get_field(ENDPOINT_TO_COMPONENT_MAP) or {}
+        if ep ~= main_endpoint then
+          map[ep] = string.format("button%d", current_component_number)
+          current_component_number = current_component_number + 1
+        else
+          map[ep] = "main"
+        end
+        device:set_field(ENDPOINT_TO_COMPONENT_MAP, map, {persist = true})
+      else -- use parent/child
+        if ep ~= main_endpoint then -- don't create a child device that maps to the main endpoint
+          local name = string.format("%s %d", device.label, current_component_number)
+          driver:try_create_device(
+            {
+              type = "EDGE_CHILD",
+              label = name,
+              profile = "child-button",
+              parent_device_id = device.id,
+              parent_assigned_child_key = string.format("%02X", ep),
+              vendor_provided_label = name
+            }
+          )
+          current_component_number = current_component_number + 1
+        end
+      end
+
+      -- this ordering is important, as MSL & MSM devices must also support MSR
+      if contains(MSL, ep) then
+        device:emit_event_for_endpoint(ep, capabilities.button.supportedButtonValues({"pushed", "held"}, {visibility = {displayed = false}}))
+      elseif contains(MSM, ep) then
+        -- ask the device to tell us its max number of presses
+        device:send(clusters.Switch.attributes.MultiPressMax:read(device, ep))
+        set_field_for_endpoint(device, MULTI_BUTTON, ep, true, true)
+      elseif contains(MSR, ep) then
+        device:emit_event_for_endpoint(ep, capabilities.button.supportedButtonValues({"pushed", "held"}, {visibility = {displayed = false}}))
+        set_field_for_endpoint(device, EMULATE_HELD, ep, true, true)
+      else -- device only supports momentary switch, no release events
+        device:emit_event_for_endpoint(ep, capabilities.button.supportedButtonValues({"pushed"}, {visibility = {displayed = false}}))
+        set_field_for_endpoint(device, INITIAL_PRESS_ONLY, ep, true, true)
+      end
+      device:emit_event_for_endpoint(ep, capabilities.button.button.pushed({state_change = false}))
+    end
+
+    -- TODO: Solution for latching switches
+    -- for _, ep in ipairs(LS) do
+    --   local name = string.format("%s %d", device.label, ep)
+    --   local child = driver:try_create_device(
+    --     {
+    --       type = "EDGE_CHILD",
+    --       label = name,
+    --       profile = "child-button",
+    --       parent_device_id = device.id,
+    --       parent_assigned_child_key = string.format("%02X", ep),
+    --       vendor_provided_label = name
+    --     }
+    --   )
+    --   -- Latching switches are switches that don't return to an idle position after being pressed.
+    --   -- In that sense, they can be all sorts of things, like dials or radio buttons. This means
+    --   -- they can have any number of states > 2. However, due to the current nature of our capabilities
+    --   -- our ability to support the full range of options here is limited, so we will stick with
+    --   -- up/down rocker switches (kind of).
+    --   child:emit_event(capabilities.button.supportedButtonValues({"up","down"}, {visibility = {displayed = false}}))
+    -- end
+
+    device:send(clusters.PowerSource.attributes.BatPercentRemaining:read(device))
   end
-  device:set_field(STATE, BUTTON_STATE_MAP.WAIT) --set wait state
-
-  device:emit_event(capabilities.button.numberOfButtons({value=1}, {visibility = {displayed = false}})) --number of buttons
-
 end
 
 --end of lifecyle handlers
@@ -146,29 +193,33 @@ end
 
 -- initial press
 local function initial_event_handler(driver, device, ib, response)
-  --button 0 has been pressed
-  init_press(device, 0)
-  -- move to PRESSED state
-  next_button_state(device, BUTTON_STATE_MAP.PRESSED, 0) -- 0 is for multipress
-  button_event(device, ib, 0)
+  if not get_field_for_endpoint(device, MULTI_BUTTON, ib.endpoint_id) then
+    if get_field_for_endpoint(device, INITIAL_PRESS_ONLY, ib.endpoint_id) then
+      device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.button.pushed({state_change = true}))
+    elseif get_field_for_endpoint(device, EMULATE_HELD, ib.endpoint_id) then
+      -- if our button doesn't differentiate between short and long holds, do it in code by keeping track of the press down time
+      init_press(device, ib.endpoint_id)
+    end
+  end
 end
 
-local function long_event_handler(driver, device, ib, response)
-  -- long press, button is being held
-  -- move to HELD state
-  next_button_state(device, BUTTON_STATE_MAP.HELD_COMPLETE, 0)
-
-  --0 is for multpress
-  button_event(device, ib, 0)
+-- if the devce distinguishes a long press event, it will always be a "held"
+-- there's also a "long release" event, but this event is required to come first
+local function long_press_event_handler(driver, device, ib, response)
+  if not get_field_for_endpoint(device, MULTI_BUTTON, ib.endpoint_id) then
+    device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.button.held({state_change = true}))
+  end
 end
 
--- release event handler
-local function release_event_handler(driver, device, ib, response)
-  -- button has been released
-  -- move to WAIT state
-  next_button_state(device, BUTTON_STATE_MAP.WAIT, 0)
-  button_event(device, ib, 0)
-
+-- short release event handler
+local function short_release_event_handler(driver, device, ib, response)
+  if not get_field_for_endpoint(device, MULTI_BUTTON, ib.endpoint_id) then
+    if get_field_for_endpoint(device, EMULATE_HELD, ib.endpoint_id) then
+      emulate_held_event(device, ib.endpoint_id)
+    else
+      device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.button.pushed({state_change = true}))
+    end
+  end
 end
 
 
@@ -180,9 +231,13 @@ local function multi_event_handler(driver, device, ib, response)
     local press_value = ib.data.elements.total_number_of_presses_counted.value
     --capability only supports up to 6 presses
     if press_value < 7 then
-      next_button_state(device, BUTTON_STATE_MAP.HELD_COMPLETE, 0)
-      button_event(device, ib, press_value)
-      next_button_state(device, BUTTON_STATE_MAP.WAIT, 0)
+      local button_event = capabilities.button.button.pushed({state_change = true})
+      if press_value == 2 then
+        button_event = capabilities.button.button.double({state_change = true})
+      else
+        button_event = capabilities.button.button(string.format("pushed_%dx", press_value), {state_change = true})
+      end
+      device:emit_event_for_endpoint(ib.endpoint_id, button_event)
     else
       log.info("Number of presses not supported by capability")
     end
@@ -199,30 +254,16 @@ end
 
 --need to find out max number of times a button can be pressed
 local function max_press_handler(driver, device, ib, response)
-  if ib.data.value then
-    local MAX = ib.data.value or 1 --get max number of presses
-    -- capability only supports up to 6 presses
-    if MAX < 7 then
-      local values = create_multi_list(MAX)
-      device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.supportedButtonValues(values, {visibility = {displayed = false}}))
-      device:set_field(MAX_PRESS, MAX)
-    else
-      log.info("Number of presses not supported by capability")
-    end
+  local max = ib.data.value or 1 --get max number of presses
+  -- capability only supports up to 6 presses
+  if max > 6 then
+    log.info("Device supports more than 6 presses")
+    max = 6
   end
+  local values = create_multi_list(max)
+  device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.supportedButtonValues(values, {visibility = {displayed = false}}))
 end
 
---needed for latching switch
-local function current_pos_handler(driver, device, ib, response)
-  local button_type = device:get_field(BUTTON_TYPE)
-  if ib.data.value and button_type == BUTTON_TYPE_MAP.LATCH_SWITCH then
-    if ib.data.value == 1 then
-      device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.button.up({state_change = true})) --off
-    else
-      device:emit_event_for_endpoint(ib.endpoint_id, capabilities.button.button.down({state_change = true})) --on
-    end
-  end
-end
 
 -- end of attribute handlers
 -- ------------------------------------------------------------------------
@@ -235,16 +276,13 @@ local matter_driver_template = {
       },
       [clusters.Switch.ID] = {
         [clusters.Switch.attributes.MultiPressMax.ID] = max_press_handler,
-        [clusters.Switch.attributes.CurrentPosition.ID] = current_pos_handler,
-        --number of positions attribute? for switches with more than two positions
       }
     },
     event = {
       [clusters.Switch.ID] = {
         [clusters.Switch.events.InitialPress.ID] = initial_event_handler,
-        [clusters.Switch.events.LongPress.ID] = long_event_handler,
-        [clusters.Switch.events.ShortRelease.ID] = release_event_handler,
-        [clusters.Switch.events.LongRelease.ID] = release_event_handler,
+        [clusters.Switch.events.LongPress.ID] = long_press_event_handler,
+        [clusters.Switch.events.ShortRelease.ID] = short_release_event_handler,
         [clusters.Switch.events.MultiPressComplete.ID] = multi_event_handler,
       }
     },
@@ -263,7 +301,6 @@ local matter_driver_template = {
       clusters.Switch.events.InitialPress,
       clusters.Switch.events.LongPress,
       clusters.Switch.events.ShortRelease,
-      clusters.Switch.events.LongRelease,
       clusters.Switch.events.MultiPressComplete
     }
   },

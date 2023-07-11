@@ -8,7 +8,7 @@ local button_attr = capabilities.button.button
 --mock the actual device
 local mock_device = test.mock_device.build_test_matter_device(
   {
-    profile = t_utils.get_profile_definition("button-profile.yml"),
+    profile = t_utils.get_profile_definition("4-button.yml"), -- on a real device we would switch to this, rather than fingerprint to it
     manufacturer_info = {vendor_id = 0x0000, product_id = 0x0000},
     endpoints = {
     {
@@ -20,6 +20,36 @@ local mock_device = test.mock_device.build_test_matter_device(
           cluster_type = "SERVER"
         },
         {cluster_id = clusters.PowerSource.ID, cluster_type = "SERVER"}
+      },
+    },
+    {
+      endpoint_id = 2,
+      clusters = {
+        {
+          cluster_id = clusters.Switch.ID,
+          feature_map = clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH | clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_RELEASE,
+          cluster_type = "SERVER"
+        },
+      },
+    },
+    {
+      endpoint_id = 3,
+      clusters = {
+        {
+          cluster_id = clusters.Switch.ID,
+          feature_map = clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH | clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_LONG_PRESS,
+          cluster_type = "SERVER"
+        },
+      },
+    },
+    {
+      endpoint_id = 5,
+      clusters = {
+        {
+          cluster_id = clusters.Switch.ID,
+          feature_map = clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH | clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_MULTI_PRESS,
+          cluster_type = "SERVER"
+        },
       },
     },
   },
@@ -44,8 +74,20 @@ local function test_init()
   test.socket.matter:__expect_send({mock_device.id, subscribe_request})
   test.mock_device.add_test_device(mock_device)
   test.socket.device_lifecycle:__queue_receive({ mock_device.id, "added" })
+  mock_device:expect_metadata_update({ profile = "4-button" })
+
   test.socket.capability:__expect_send(mock_device:generate_test_message("main", capabilities.button.supportedButtonValues({"pushed"}, {visibility = {displayed = false}})))
   test.socket.capability:__expect_send(mock_device:generate_test_message("main", button_attr.pushed({state_change = false})))
+
+  test.socket.capability:__expect_send(mock_device:generate_test_message("button2", capabilities.button.supportedButtonValues({"pushed", "held"}, {visibility = {displayed = false}})))
+  test.socket.capability:__expect_send(mock_device:generate_test_message("button2", button_attr.pushed({state_change = false})))
+
+  test.socket.capability:__expect_send(mock_device:generate_test_message("button3", capabilities.button.supportedButtonValues({"pushed", "held"}, {visibility = {displayed = false}})))
+  test.socket.capability:__expect_send(mock_device:generate_test_message("button3", button_attr.pushed({state_change = false})))
+
+  test.socket.matter:__expect_send({mock_device.id, clusters.Switch.attributes.MultiPressMax:read(mock_device, 5)})
+  test.socket.capability:__expect_send(mock_device:generate_test_message("button4", button_attr.pushed({state_change = false})))
+
   test.socket.matter:__expect_send({mock_device.id, clusters.PowerSource.attributes.BatPercentRemaining:read(mock_device)})
 end
 
@@ -69,6 +111,187 @@ test.register_message_test(
     message = mock_device:generate_test_message("main", button_attr.pushed({state_change = true})) --should send initial press
   }
 }
+)
+
+test.register_message_test(
+  "Handle single press sequence for short release-supported button", {
+  {
+    channel = "matter",
+    direction = "receive",
+    message = {
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 2, {new_position = 1}  --move to position 1?
+      ),
+    }
+  },
+  {
+    channel = "matter",
+    direction = "receive",
+    message = {
+      mock_device.id,
+      clusters.Switch.events.ShortRelease:build_test_event_report(
+        mock_device, 2, {previous_position = 0}  --move to position 1?
+      ),
+    }
+  },
+  {
+    channel = "capability",
+    direction = "send",
+    message = mock_device:generate_test_message("button2", button_attr.pushed({state_change = true})) --should send initial press
+  }
+}
+)
+
+test.register_coroutine_test(
+  "Handle single press sequence for emulated hold on short-release-only button",
+  function ()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 2, {new_position = 1}
+      )
+    })
+    test.wait_for_events()
+    test.mock_time.advance_time(2)
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.ShortRelease:build_test_event_report(
+        mock_device, 2, {previous_position = 0}
+      )
+    })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("button2", button_attr.held({state_change = true})))
+  end
+)
+
+test.register_coroutine_test(
+  "Handle single press sequence for a long hold on long-release-capable button", -- only a long press event should generate a held event
+  function ()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 3, {new_position = 1}
+      )
+    })
+    test.wait_for_events()
+    test.mock_time.advance_time(2)
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.ShortRelease:build_test_event_report(
+        mock_device, 3, {previous_position = 0}
+      )
+    })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("button3", button_attr.pushed({state_change = true})))
+  end
+)
+
+test.register_coroutine_test(
+  "Handle single press sequence for a long hold on multi button", -- pushes should only be generated from multiPressComplete events
+  function ()
+    test.timer.__create_and_queue_test_time_advance_timer(2, "oneshot")
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 5, {new_position = 1}
+      )
+    })
+    test.wait_for_events()
+    test.mock_time.advance_time(2)
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.ShortRelease:build_test_event_report(
+        mock_device, 5, {previous_position = 0}
+      )
+    })
+  end
+)
+
+test.register_coroutine_test(
+  "Handle single press sequence for a multi press on multi button",
+  function ()
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 5, {new_position = 1}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.ShortRelease:build_test_event_report(
+        mock_device, 5, {previous_position = 0}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 5, {new_position = 1}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.MultiPressOngoing:build_test_event_report(
+        mock_device, 5, {new_position = 1, current_number_of_presses_counted = 2}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.MultiPressComplete:build_test_event_report(
+        mock_device, 5, {new_position = 0, total_number_of_presses_counted = 2}
+      )
+    })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("button4", button_attr.double({state_change = true})))
+  end
+)
+
+test.register_coroutine_test(
+  "Handle long press sequence for a long hold on long-release-capable button", -- only a long press event should generate a held event
+  function ()
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 3, {new_position = 1}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.LongPress:build_test_event_report(
+        mock_device, 3, {new_position = 1}
+      )
+    })
+    test.socket.capability:__expect_send(mock_device:generate_test_message("button3", button_attr.held({state_change = true})))
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.LongRelease:build_test_event_report(
+        mock_device, 3, {previous_position = 0}
+      )
+    })
+  end
+)
+
+test.register_coroutine_test(
+  "Handle long press sequence for a long hold on multi button", -- only multi-press events should generate events
+  function ()
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.InitialPress:build_test_event_report(
+        mock_device, 5, {new_position = 1}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.LongPress:build_test_event_report(
+        mock_device, 5, {new_position = 1}
+      )
+    })
+    test.socket.matter:__queue_receive({
+      mock_device.id,
+      clusters.Switch.events.LongRelease:build_test_event_report(
+        mock_device, 5, {previous_position = 0}
+      )
+    })
+  end
 )
 
 test.register_message_test(
