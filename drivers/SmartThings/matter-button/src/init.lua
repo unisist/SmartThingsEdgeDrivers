@@ -4,7 +4,6 @@ local clusters = require "st.matter.generated.zap_clusters"
 local MatterDriver = require "st.matter.driver"
 local lua_socket = require "socket"
 local device_lib = require "st.device"
-local utils = require "st.utils"
 
 local START_BUTTON_PRESS = "__start_button_press"
 local TIMEOUT_THRESHOLD = 10 --arbitrary timeout
@@ -99,7 +98,7 @@ end
 local function device_added(driver, device)
   if device.network_type ~= device_lib.NETWORK_TYPE_CHILD then
     local MS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH})
-    local LS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.LATCHING_SWITCH})
+    -- local LS = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.LATCHING_SWITCH})
 
     -- find the default/main endpoint, the device with the lowest EP that supports MS
     table.sort(MS)
@@ -234,7 +233,7 @@ local function multi_event_handler(driver, device, ib, response)
       local button_event = capabilities.button.button.pushed({state_change = true})
       if press_value == 2 then
         button_event = capabilities.button.button.double({state_change = true})
-      else
+      elseif press_value > 2 then
         button_event = capabilities.button.button(string.format("pushed_%dx", press_value), {state_change = true})
       end
       device:emit_event_for_endpoint(ib.endpoint_id, button_event)
