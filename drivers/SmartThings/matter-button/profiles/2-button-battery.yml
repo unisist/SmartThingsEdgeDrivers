@@ -1,8 +1,10 @@
-name: 2-button
+name: 2-button-battery
 components:
   - id: main
     capabilities:
       - id: button
+        version: 1
+      - id: battery
         version: 1
       - id: firmwareUpdate
         version: 1

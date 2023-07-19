@@ -45,8 +45,6 @@ local function set_field_for_endpoint(device, field, endpoint, value, persist)
   device:set_field(string.format("%s_%d", field, endpoint), value, {persist = persist})
 end
 
---helper functions for button timing
---button_number is which button was pressed?
 local function init_press(device, endpoint)
   set_field_for_endpoint(device, START_BUTTON_PRESS, endpoint, lua_socket.gettime(), false)
 end
@@ -102,16 +100,27 @@ local function device_added(driver, device)
 
     -- find the default/main endpoint, the device with the lowest EP that supports MS
     table.sort(MS)
-    local main_endpoint = MS[1] -- the endpoint matching to the non-child device
-    if MS[1] == 0 then main_endpoint = MS[2] end -- we shouldn't hit this, but just in case
+    local main_endpoint = device.MATTER_DEFAULT_ENDPOINT
+    if #MS > 0 then
+      main_endpoint = MS[1] -- the endpoint matching to the non-child device
+      if MS[1] == 0 then main_endpoint = MS[2] end -- we shouldn't hit this, but just in case
+    end
 
     local MSR = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_RELEASE})
     local MSL = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_LONG_PRESS})
     local MSM = device:get_endpoints(clusters.Switch.ID, {feature_bitmap=clusters.Switch.types.SwitchFeature.MOMENTARY_SWITCH_MULTI_PRESS})
+    local battery_support = device:get_endpoints(clusters.PowerSource.ID)
 
     -- We have a static profile that will work for this number of buttons
     if contains(STATIC_PROFILE_SUPPORTED, #MS) then
-      device:try_update_metadata({profile = string.format("%d-button", #MS)})
+      if #battery_support == 0 then
+        device:try_update_metadata({profile = string.format("%d-button", #MS)})
+      else
+        device:try_update_metadata({profile = string.format("%d-button-battery", #MS)})
+      end
+    elseif #battery_support == 0 then
+      -- a battery-less button/remote (either single or will use parent/child)
+      device:try_update_metadata({profile = "button"})
     end
 
     -- At the moment, we're taking it for granted that all momentary switches only have 2 positions
@@ -183,7 +192,6 @@ local function device_added(driver, device)
     --   child:emit_event(capabilities.button.supportedButtonValues({"up","down"}, {visibility = {displayed = false}}))
     -- end
 
-    device:send(clusters.PowerSource.attributes.BatPercentRemaining:read(device))
   end
 end
 
@@ -290,10 +298,6 @@ local matter_driver_template = {
     [capabilities.battery.ID] = {
       clusters.PowerSource.attributes.BatPercentRemaining,
     },
-    [capabilities.button.ID] = {
-      clusters.Switch.attributes.MultiPressMax,
-      clusters.Switch.attributes.CurrentPosition
-    }
   },
   subscribed_events = {
     [capabilities.button.ID] = {
