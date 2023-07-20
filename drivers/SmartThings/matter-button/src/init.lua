@@ -144,7 +144,7 @@ local function device_added(driver, device)
             {
               type = "EDGE_CHILD",
               label = name,
-              profile = "child-button",
+              profile = "button",
               parent_device_id = device.id,
               parent_assigned_child_key = string.format("%02X", ep),
               vendor_provided_label = name
