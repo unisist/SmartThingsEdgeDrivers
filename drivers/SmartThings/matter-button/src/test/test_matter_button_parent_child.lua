@@ -5,7 +5,7 @@ local t_utils = require "integration_test.utils"
 local clusters = require "st.matter.generated.zap_clusters"
 local button_attr = capabilities.button.button
 
-local child_profile = t_utils.get_profile_definition("child-button.yml")
+local child_profile = t_utils.get_profile_definition("button.yml")
 
 --mock the actual device
 local mock_device = test.mock_device.build_test_matter_device(
