@@ -110,7 +110,7 @@ local function test_init()
   mock_device:expect_device_create({
     type = "EDGE_CHILD",
     label = "Matter Button 2",
-    profile = "child-button",
+    profile = "button",
     parent_device_id = mock_device.id,
     parent_assigned_child_key = "03"
   })
@@ -120,7 +120,7 @@ local function test_init()
   mock_device:expect_device_create({
     type = "EDGE_CHILD",
     label = "Matter Button 3",
-    profile = "child-button",
+    profile = "button",
     parent_device_id = mock_device.id,
     parent_assigned_child_key = "04"
   })
@@ -130,7 +130,7 @@ local function test_init()
   mock_device:expect_device_create({
     type = "EDGE_CHILD",
     label = "Matter Button 4",
-    profile = "child-button",
+    profile = "button",
     parent_device_id = mock_device.id,
     parent_assigned_child_key = "05"
   })
@@ -140,7 +140,7 @@ local function test_init()
   mock_device:expect_device_create({
     type = "EDGE_CHILD",
     label = "Matter Button 5",
-    profile = "child-button",
+    profile = "button",
     parent_device_id = mock_device.id,
     parent_assigned_child_key = "06"
   })
