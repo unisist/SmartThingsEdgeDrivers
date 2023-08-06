@@ -1,4 +1,4 @@
-name: metering-switch
+name: smartplug-switch-power-energy
 components:
 - id: main
   capabilities:
@@ -8,9 +8,7 @@ components:
     version: 1
   - id: energyMeter
     version: 1
-  - id: powerConsumptionReport
-    version: 1
   - id: refresh
     version: 1
   categories:
-  - name: Switch
+  - name: SmartPlug

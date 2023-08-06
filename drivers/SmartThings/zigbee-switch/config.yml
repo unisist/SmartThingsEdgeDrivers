@@ -1,5 +1,5 @@
-name: 'Zigbee Switch'
-packageKey: 'zigbee-switch'
+name: 'Zigbee Switch Ryan'
+packageKey: 'zigbee-switch-ryan'
 permissions:
   zigbee: {}
 description: "SmartThings driver for Zigbee switch devices"

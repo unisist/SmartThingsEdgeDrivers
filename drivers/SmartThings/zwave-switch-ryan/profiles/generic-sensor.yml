@@ -1,16 +1,16 @@
-name: metering-switch
+name: generic-sensor
 components:
 - id: main
   capabilities:
-  - id: switch
+  - id: contactSensor
     version: 1
-  - id: powerMeter
+  - id: motionSensor
     version: 1
-  - id: energyMeter
+  - id: smokeDetector
     version: 1
-  - id: powerConsumptionReport
+  - id: waterSensor
     version: 1
   - id: refresh
     version: 1
   categories:
-  - name: Switch
+  - name: GenericSensor
