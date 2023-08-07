@@ -61,12 +61,20 @@ local function meter_report_handler(driver, device, cmd)
     local current_power_consumption = device:get_latest_state("main", capabilities.powerConsumptionReport.ID, capabilities.powerConsumptionReport.powerConsumption.NAME)
     if current_power_consumption ~= nil then
       delta_energy = math.max( cmd.args.meter_value * 1000 - current_power_consumption.energy, 0.0)
+      if delta_energy > 0 then
+        device:emit_event(
+          capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = delta_energy })
+        )
+        log.info(string.format("1-1   %s", tostring(delta_energy)))
+      else
+        log.info(string.format("1-1   %s delta is zero. no event sent", tostring(delta_energy)))
+      end
+    else
+      device:emit_event(
+        capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = delta_energy })
+      )
+      log.info(string.format("1-3   %s First report as delta = zero", tostring(delta_energy)))
     end
-    device:emit_event_for_endpoint(
-      cmd.src_channel,
-      capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = delta_energy })
-    )
-    log.info(string.format("1-1   %s", tostring(delta_energy)))
   end
 end
 
