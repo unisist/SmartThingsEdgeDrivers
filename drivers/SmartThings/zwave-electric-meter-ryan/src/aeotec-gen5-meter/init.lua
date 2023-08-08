@@ -12,31 +12,24 @@
 -- See the License for the specific language governing permissions and
 -- limitations under the License.
 
-local st_device = require "st.device"
-local utils = require "st.utils"
-local capabilities = require "st.capabilities"
---- @type st.zwave.CommandClass
-local cc = require "st.zwave.CommandClass"
---- @type st.zwave.CommandClass.Meter
-local Meter = (require "st.zwave.CommandClass.Meter")({version = 3})
---- @type st.zwave.CommandClass.Basic
-local Basic = (require "st.zwave.CommandClass.Basic")({ version = 1, strict = true })
---- @type st.zwave.CommandClass.SwitchBinary
-local SwitchBinary = (require "st.zwave.CommandClass.SwitchBinary")({version = 2, strict = true })
-
+--- @type st.zwave.CommandClass.Configuration
+local Configuration = (require "st.zwave.CommandClass.Configuration")({ version=1 })
 local energyMeterDefaults = require "st.zwave.defaults.energyMeter"
 local powerMeterDefaults = require "st.zwave.defaults.powerMeter"
-local switchDefaults = require "st.zwave.defaults.switch"
+--- @type st.zwave.CommandClass.Meter
+local Meter = (require "st.zwave.CommandClass.Meter")({ version=3 })
+--- @type st.zwave.CommandClass
+local cc = require "st.zwave.CommandClass"
+local capabilities = require "st.capabilities"
 local log = require "log"
 
-local PARENT_ENDPOINT = 1
-
-local AEOTEC_HEAVY_DUTY_SWITCH_FINGERPRINTS = {
-  {mfr = 0x0086, prod = 0x0003, model = 0x004E} -- Aeotec Heavy Duty Switch
+local AEOTEC_GEN5_FINGERPRINTS = {
+  {mfr = 0x0086, prod = 0x0102, model = 0x005F},  -- Aeotec Home Energy Meter (Gen5) US
+  {mfr = 0x0086, prod = 0x0002, model = 0x005F},  -- Aeotec Home Energy Meter (Gen5) EU
 }
 
-local function can_handle_aeotec_heavy_duty_switch(opts, driver, device, ...)
-  for _, fingerprint in ipairs(AEOTEC_HEAVY_DUTY_SWITCH_FINGERPRINTS) do
+local function can_handle_aeotec_gen5_meter(opts, driver, device, ...)
+  for _, fingerprint in ipairs(AEOTEC_GEN5_FINGERPRINTS) do
     if device:id_match(fingerprint.mfr, fingerprint.prod, fingerprint.model) then
       return true
     end
@@ -44,8 +37,16 @@ local function can_handle_aeotec_heavy_duty_switch(opts, driver, device, ...)
   return false
 end
 
+local do_configure = function (self, device)
+  device:send(Configuration:Set({parameter_number = 101, size = 4, configuration_value = 3}))   -- report total power in Watts and total energy in kWh...
+  device:send(Configuration:Set({parameter_number = 102, size = 4, configuration_value = 0}))   -- disable group 2...
+  device:send(Configuration:Set({parameter_number = 103, size = 4, configuration_value = 0}))   -- disable group 3...
+  device:send(Configuration:Set({parameter_number = 111, size = 4, configuration_value = 300})) -- ...every 5 min
+  device:send(Configuration:Set({parameter_number = 90, size = 1, configuration_value = 0}))    -- enabling automatic reports, disabled selective reporting...
+  device:send(Configuration:Set({parameter_number = 13, size = 1, configuration_value = 0}))   -- disable CRC16 encapsulation
+end
 
-local function aeotec_heavy_duty_switch_meter_report_handler(driver, device, cmd)
+local function aeotec_gen5_meter_report_handler(driver, device, cmd)
   -- We got a meter report from the root node, so refresh all children
   -- endpoint 0 should have its reports dropped
   powerMeterDefaults.zwave_handlers[cc.METER][Meter.REPORT](driver, device, cmd)
@@ -78,32 +79,17 @@ local function aeotec_heavy_duty_switch_meter_report_handler(driver, device, cmd
   end
 end
 
--- Device appears to have some trouble with energy reset commands if the value is read too quickly
-local function reset(driver, device, command)
-  device.thread:call_with_delay(.5, function ()
-    device:send_to_component(Meter:Reset({}), command.component)
-  end)
-  device.thread:call_with_delay(1.5, function()
-    device:send_to_component(Meter:Get({scale = Meter.scale.electric_meter.KILOWATT_HOURS}), command.component)
-  end)
-end
-
-local aeotec_heavy_duty_switch = {
-  NAME = "Aeotec Heavy Duty metering switch",
-  capability_handlers = {
-    [capabilities.refresh.ID] = {
-      [capabilities.refresh.commands.refresh.NAME] = do_refresh
-    },
-    [capabilities.energyMeter.ID] = {
-      [capabilities.energyMeter.commands.resetEnergyMeter.NAME] = reset
-    }
+local aeotec_gen5_meter = {
+  lifecycle_handlers = {
+    doConfigure = do_configure
   },
   zwave_handlers = {
     [cc.METER] = {
-      [Meter.REPORT] = aeotec_heavy_duty_switch_meter_report_handler
+      [Meter.REPORT] = aeotec_gen5_meter_report_handler
     }
   },
-  can_handle = can_handle_aeotec_heavy_duty_switch,
+  NAME = "aeotec gen5 meter",
+  can_handle = can_handle_aeotec_gen5_meter
 }
 
-return aeotec_heavy_duty_switch
+return aeotec_gen5_meter

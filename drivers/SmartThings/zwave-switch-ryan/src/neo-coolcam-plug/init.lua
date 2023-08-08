@@ -36,7 +36,6 @@ local NEO_COOLCAM_FINGERPRINTS = {
 }
 
 local function can_handle_metering_smartplug(opts, driver, device, ...)
-  log.info(string.format(" Neo Coolcam plug handle!!"))
   for _, fingerprint in ipairs(NEO_COOLCAM_FINGERPRINTS) do
     if device:id_match(fingerprint.mfr, fingerprint.prod, fingerprint.model) then
       return true
@@ -49,30 +48,32 @@ end
 local function meter_report_handler1(driver, device, cmd)
   -- We got a meter report from the root node, so refresh all children
   -- endpoint 0 should have its reports dropped
-  log.info(string.format(" Neo Coolcam plug received!!"))
-  log.info(string.format("1   %s", tostring(cmd.args.meter_value)))
-  log.info(string.format("2   %s", tostring(cmd.args.meter_type)))
-  log.info(string.format("3   %s", tostring(cmd.args.precision)))
   powerMeterDefaults.zwave_handlers[cc.METER][Meter.REPORT](driver, device, cmd)
   energyMeterDefaults.zwave_handlers[cc.METER][Meter.REPORT](driver, device, cmd)
   if cmd.args.scale == Meter.scale.electric_meter.KILOWATT_HOURS then
     local delta_energy = 0.0
     local current_power_consumption = device:get_latest_state("main", capabilities.powerConsumptionReport.ID, capabilities.powerConsumptionReport.powerConsumption.NAME)
     if current_power_consumption ~= nil then
+      log.info(string.format("1-1 previous energy report value : %s ", tostring(current_power_consumption.energy)))
       delta_energy = math.max( cmd.args.meter_value * 1000 - current_power_consumption.energy, 0.0)
       if delta_energy > 0 then
         device:emit_event(
           capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = delta_energy })
         )
-        log.info(string.format("1-1   %s", tostring(delta_energy)))
+        log.info(string.format("1-2 normal case  %s : %s", tostring(cmd.args.meter_value * 1000), tostring(delta_energy)))
+      elseif cmd.args.meter_value == 0 then
+        log.info(string.format("1-3 meter_value is zero. meter reset case 0 : 0"))
+        device:emit_event(
+          capabilities.powerConsumptionReport.powerConsumption({ energy = 0, deltaEnergy = 0 })
+        )
       else
-        log.info(string.format("1-1   %s delta is zero. no event sent", tostring(delta_energy)))
+        log.info(string.format("1-4 delta is zero. no event sent", tostring(delta_energy)))
       end
     else
       device:emit_event(
-        capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = delta_energy })
+        capabilities.powerConsumptionReport.powerConsumption({ energy = cmd.args.meter_value * 1000, deltaEnergy = 0 })
       )
-      log.info(string.format("1-3   %s First report as delta = zero", tostring(delta_energy)))
+      log.info(string.format("1-5 First report %s : 0", tostring(cmd.args.meter_value * 1000)))
     end
   end
 end
